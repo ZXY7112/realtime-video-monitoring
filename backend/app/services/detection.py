@@ -7,7 +7,9 @@ from app.services import danger_zone as danger_zone_service
 from app.services.danger_zone import SAFETY_DISTANCE, LOITERING_THRESHOLD, TARGET_CLASSES
 # --- 结束 V4 ---
 from app.services.alerts import (
-    add_alert, update_loitering_time, reset_loitering_time, get_loitering_time,
+    add_alert_memory as add_alert, # 保留旧的内存告警作为兼容
+    create_alert, # 导入新的数据库告警函数
+    update_loitering_time, reset_loitering_time, get_loitering_time,
     update_detection_time, get_alerts, reset_alerts
 )
 from app.utils.geometry import point_in_polygon, distance_to_polygon
@@ -20,6 +22,11 @@ from app.services import violenceDetect
 # --- 新增：导入config模块以访问其状态 ---
 from app.routes import config as config_state
 # --- 结束新增 ---
+
+
+# --- 快照保存路径 ---
+SNAPSHOTS_DIR = os.path.join(os.path.dirname(__file__), '..', '..', 'uploads', 'snapshots')
+os.makedirs(SNAPSHOTS_DIR, exist_ok=True)
 
 
 # --- 模型管理 (使用相对路径) ---
@@ -149,11 +156,17 @@ def process_image(filepath, uploads_dir):
     output_url = f"/api/files/{output_filename}"
     print(f"图像处理完成，输出URL: {output_url}")
     
+    # --- FIX: 返回真实的数据库告警, 而不是旧的内存告警 ---
+    # get_alerts() 返回的是一个临时的内存列表，而 create_alert 已将告警存入数据库
+    # 此处我们返回一个确认信息，前端应通过访问告警中心API来获取最新列表
+    final_alerts = get_alerts() # 获取内存中的告警，用于即时（但不可靠）的反馈
+    
     return {
         "status": "success",
         "media_type": "image",
         "file_url": output_url,
-        "alerts": get_alerts()
+        "alerts": final_alerts, # 返回处理期间生成的内存告警
+        "message": "Processing complete. Check alert center for persistent alerts."
     }
 
 def process_video(filepath, uploads_dir):
@@ -311,11 +324,15 @@ def process_video(filepath, uploads_dir):
     output_url = f"/api/files/{output_filename}"
     print(f"视频处理完成，输出URL: {output_url}")
     
+    # --- FIX: 同上, 视频处理也应明确返回处理期间的告警 ---
+    final_alerts = get_alerts()
+    
     return {
         "status": "success",
         "media_type": "video",
         "file_url": output_url,
-        "alerts": get_alerts()
+        "alerts": final_alerts,
+        "message": "Processing complete. Check alert center for persistent alerts."
     }
 
 
@@ -352,7 +369,11 @@ def process_smoking_detection_hybrid(frame, person_results, face_results, smokin
 
                 smoking_results = smoking_model.predict(roi_crop, imgsz=640, verbose=False)
                 if len(smoking_results[0].boxes) > 0:
-                    add_alert("Smoking Detected (High-Confidence)")
+                    snapshot_path = save_snapshot(frame) # 保存快照
+                    add_alert("High-Confidence Smoking Detection in ROI", 
+                             event_type="smoking_detection", 
+                             details="高置信度吸烟检测行为", 
+                             snapshot_path=snapshot_path)
                     for s_box in smoking_results[0].boxes:
                         s_xyxy = s_box.xyxy.cpu().numpy().astype(int)[0]
                         abs_x1, abs_y1 = s_xyxy[0] + roi_x1, s_xyxy[1] + roi_y1
@@ -375,7 +396,11 @@ def process_smoking_detection_hybrid(frame, person_results, face_results, smokin
 
         smoking_results = smoking_model.predict(upper_body_crop, imgsz=1024, verbose=False)
         if len(smoking_results[0].boxes) > 0:
-            add_alert("Smoking Detected (Low-Confidence/Distant)")
+            snapshot_path = save_snapshot(frame) # 保存快照
+            add_alert("Low-Confidence/Distant Smoking Detection in Upper Body",
+                     event_type="smoking_detection",
+                     details="低置信度/远距离吸烟检测行为",
+                     snapshot_path=snapshot_path)
             for s_box in smoking_results[0].boxes:
                 s_xyxy = s_box.xyxy.cpu().numpy().astype(int)[0]
                 abs_x1, abs_y1 = s_xyxy[0] + px1, s_xyxy[1] + py1
@@ -443,7 +468,11 @@ def process_object_detection_results(results, frame, time_diff, frame_count):
                     # 使用纯红色
                     label_color = (0, 0, 255)  # BGR格式：红色
                     alert_status = f"ID:{id} ({display_name}) staying in danger zone for {loitering_time:.1f}s"
-                    add_alert(alert_status)
+                    snapshot_path = save_snapshot(frame) # 保存快照
+                    add_alert(alert_status,
+                             event_type="danger_zone_intrusion",
+                             details=f"人员 {display_name} 在危险区域停留 {loitering_time:.1f} 秒",
+                             snapshot_path=snapshot_path)
                 else:
                     # 根据停留时间从橙色到红色渐变
                     ratio = min(1.0, loitering_time / LOITERING_THRESHOLD)
@@ -461,7 +490,11 @@ def process_object_detection_results(results, frame, time_diff, frame_count):
                     label_color = (0, 255, int(255 * (1 - ratio)))
                     
                     alert_status = f"ID:{id} ({display_name}) too close to danger zone ({distance:.1f}px)"
-                    add_alert(alert_status)
+                    snapshot_path = save_snapshot(frame) # 保存快照
+                    add_alert(alert_status,
+                             event_type="proximity_warning",
+                             details=f"人员 {display_name} 过于接近危险区域，距离 {distance:.1f} 像素",
+                             snapshot_path=snapshot_path)
             
             # 在每个目标上方显示ID和类别
             label = f"ID:{id} {display_name}"
@@ -574,7 +607,11 @@ def process_pose_estimation_results(results, frame, time_diff, frame_count):
                                 # 角度小于45度，意味着身体更趋向于水平
                                 if angle < 45: 
                                     alert_message = f"警告: 人员 {person_id} 可能已跌倒!"
-                                    add_alert(alert_message) # 修正：只传递一个参数
+                                    snapshot_path = save_snapshot(frame) # 保存快照
+                                    add_alert(f"Fall Detected: Person ID {person_id} may have fallen.",
+                                             event_type="fall_detection",
+                                             details=f"检测到人员 {person_id} 可能跌倒，身体角度 {angle:.1f} 度",
+                                             snapshot_path=snapshot_path)
                                     # 在人的边界框上方用红色字体标注
                                     cv2.putText(frame, f"FALL DETECTED: ID {person_id}", 
                                                 (int(box[0]), int(box[1] - 10)),
@@ -592,7 +629,6 @@ def process_pose_estimation_results(results, frame, time_diff, frame_count):
 
 # 为了保持兼容，我们将旧的函数重命名
 process_detection_results = process_object_detection_results
-
 
 # --- 新的、带结果黏滞和多线程优化的高频人脸识别逻辑 ---
 
@@ -753,8 +789,14 @@ def process_violence_detection(filepath, uploads_dir):
     alerts = []
     if violence_prob > 0.7:
         alerts.append("warning: 检测到高概率暴力行为!")
+        add_alert(f"High probability ({violence_prob:.2f}) of violence detected.",
+                 event_type="violence_detection",
+                 details=f"检测到高概率暴力行为，置信度 {violence_prob:.2f}")
     elif violence_prob > 0.5:
         alerts.append("caution: 检测到可能的暴力行为")
+        add_alert(f"Possible violence detected ({violence_prob:.2f}).",
+                 event_type="violence_detection", 
+                 details=f"检测到可能的暴力行为，置信度 {violence_prob:.2f}")
     else:
         alerts.append("safe: 未检测到明显暴力行为")
 
@@ -766,3 +808,17 @@ def process_violence_detection(filepath, uploads_dir):
         "violenceProbability": float(violence_prob),
         "nonViolenceProbability": float(non_violence_prob)
     } 
+
+def save_snapshot(frame):
+    """保存当前帧的快照并返回相对路径"""
+    timestamp = int(time.time() * 1000)
+    filename = f"snapshot_{timestamp}.jpg"
+    filepath = os.path.join(SNAPSHOTS_DIR, filename)
+    
+    try:
+        cv2.imwrite(filepath, frame)
+        # 返回可供前端访问的相对URL
+        return f"/api/files/snapshots/{filename}"
+    except Exception as e:
+        print(f"快照保存失败: {e}")
+        return None
