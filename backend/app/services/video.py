@@ -124,10 +124,14 @@ def video_feed():
                                 violence_status = "safe"
                             elif violence_prob <= 0.7:
                                 violence_status = "caution"
-                                add_alert("caution: 检测到可能的暴力行为")
+                                add_alert("caution: 检测到可能的暴力行为",
+                                         event_type="violence_detection",
+                                         details=f"检测到可能的暴力行为，置信度 {violence_prob:.2f}")
                             else:
                                 violence_status = "warning"
-                                add_alert("warning: 检测到高概率暴力行为!")
+                                add_alert("warning: 检测到高概率暴力行为!",
+                                         event_type="violence_detection", 
+                                         details=f"检测到高概率暴力行为，置信度 {violence_prob:.2f}")
                         except Exception as e:
                             violence_status = "error"
                             violence_prob = 0.0
@@ -211,4 +215,4 @@ def stop_video_feed_service():
     global CAMERA_ACTIVE
     CAMERA_ACTIVE = False
     print("摄像头视频流已请求停止。")
-    return True 
+    return True

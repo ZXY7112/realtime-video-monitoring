@@ -1,44 +1,57 @@
 <template>
   <div class="alert-info-page">
-    <h1>实时告警信息列表</h1>
+    <h1>告警中心</h1>
 
     <div class="alert-section control-section">
-      <!-- 告警统计 -->
-      <div class="alert-stats">
-        <span>当前共有 <strong>{{ alerts.length }}</strong> 条告警信息</span>
+      <div class="filters">
+        <label>
+          状态过滤:
+          <select v-model="filterStatus" @change="fetchAlerts(1)">
+            <option value="">所有状态</option>
+            <option value="unprocessed">未处理</option>
+            <option value="viewed">已查看</option>
+            <option value="resolved">已解决</option>
+          </select>
+        </label>
       </div>
       
-      <!-- 告警列表 -->
       <div class="alerts-table-container">
         <table class="alerts-table">
           <thead>
             <tr>
-              <th>监控回放</th>
+              <th>快照/回放</th>
               <th>告警类型</th>
-              <th>告警地点</th>
+              <th>告警详情</th>
               <th>告警时间</th>
+              <th>状态</th>
               <th>操作</th>
             </tr>
           </thead>
           <tbody>
-            <tr v-for="alert in currentPageAlerts" :key="alert.id" class="alert-row">
+            <tr v-for="alert in alerts" :key="alert.id" class="alert-row" :class="`status-${alert.status}`">
               <td class="alert-video">
-                <img :src="alert.snapshotUrl" alt="告警快照" class="alert-snapshot" />
-                <button @click="playVideo(alert.videoUrl)" class="play-button">
+                <img :src="getSnapshotUrl(alert.frame_snapshot_path)" 
+                     alt="告警快照" 
+                     class="alert-snapshot" 
+                     @click="showSnapshotModal(getSnapshotUrl(alert.frame_snapshot_path))"
+                     @error="onImageError"/>
+                <button v-if="alert.video_path" @click="playVideo(alert.video_path)" class="play-button">
                   <i class="fa fa-play"></i> 回放
                 </button>
               </td>
-              <td>{{ alert.type }}</td>
-              <td>{{ alert.location }}</td>
-              <td>{{ alert.time }}</td>
+              <td>{{ alert.event_type }}</td>
+              <td>{{ alert.details }}</td>
+              <td>{{ new Date(alert.timestamp).toLocaleString() }}</td>
               <td>
-                <button @click="handleAlert(alert.id)" class="handle-button">
-                  <i class="fa fa-wrench"></i> 处置
-                </button>
+                <span class="status-badge">{{ alert.status }}</span>
+              </td>
+              <td>
+                <button @click="changeStatus(alert, 'viewed')" :disabled="alert.status === 'viewed' || alert.status === 'resolved'" class="handle-button">设为已读</button>
+                <button @click="changeStatus(alert, 'resolved')" :disabled="alert.status === 'resolved'" class="handle-button">解决</button>
               </td>
             </tr>
-            <tr v-if="!currentPageAlerts.length" class="no-alert-row">
-              <td colspan="5">
+            <tr v-if="!alerts.length" class="no-alert-row">
+              <td colspan="6">
                 <div class="video-placeholder">
                   <p>当前无告警信息</p>
                 </div>
@@ -48,352 +61,233 @@
         </table>
       </div>
       
-      <!-- 分页控件 -->
       <div class="pagination-controls" v-if="totalPages > 1">
-        <button @click="prevPage" :disabled="currentPage === 1" class="page-button">
-          <i class="fa fa-chevron-left"></i> 上一页
+        <button @click="fetchAlerts(currentPage - 1)" :disabled="currentPage <= 1" class="page-button">
+          上一页
         </button>
-        
         <div class="page-numbers">
-          <button 
-            v-for="page in pageRange" 
-            :key="page" 
-            :class="{ active: page === currentPage }"
-            @click="goToPage(page)"
-            class="page-number"
-          >
-            {{ page }}
-          </button>
+          <span>第 {{ currentPage }} / {{ totalPages }} 页</span>
         </div>
-        
-        <button @click="nextPage" :disabled="currentPage === totalPages" class="page-button">
-          下一页 <i class="fa fa-chevron-right"></i>
+        <button @click="fetchAlerts(currentPage + 1)" :disabled="currentPage >= totalPages" class="page-button">
+          下一页
         </button>
+      </div>
+    </div>
+
+    <!-- 快照放大模态框 -->
+    <div v-if="snapshotModalVisible" class="snapshot-modal" @click="hideSnapshotModal">
+      <div class="modal-content">
+        <span class="close-button" @click="hideSnapshotModal">&times;</span>
+        <img :src="modalSnapshotUrl" alt="告警快照放大" class="modal-image"/>
       </div>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted, computed } from 'vue';
-import { useRouter } from 'vue-router';
+import { ref, onMounted } from 'vue';
 
-// API端点设置
-const SERVER_ROOT_URL = 'http://localhost:5000';
-const API_BASE_URL = `${SERVER_ROOT_URL}/api`;
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://127.0.0.1:5000/api';
+const SERVER_ROOT_URL = import.meta.env.VITE_API_URL || 'http://127.0.0.1:5000';
 
-// 状态变量
 const alerts = ref([]);
 const currentPage = ref(1);
-const pageSize = ref(5);
-const router = useRouter();
+const totalPages = ref(1);
+const filterStatus = ref('');
+const snapshotModalVisible = ref(false);
+const modalSnapshotUrl = ref('');
 
-// 生成测试用例数据
-const generateTestAlerts = () => {
-  // 模拟不同类型的告警
-  const alertTypes = [
-    '区域入侵',
-    '人员聚集',
-    '长时间停留',
-    '异常行为',
-    '物品遗留'
-  ];
-  
-  // 模拟不同监控地点
-  const locations = [
-    '东门入口通道',
-    '二号仓库A区',
-    '主楼大厅左侧',
-    '地下车库B3区域',
-    '南门安检处',
-    '办公楼一层走廊',
-    '货运通道闸机口'
-  ];
-  
-  // 生成12条测试数据（用于测试分页）
-  return Array.from({ length: 12 }, (_, i) => {
-    const now = new Date();
-    // 时间错开，模拟不同时间的告警
-    const alertTime = new Date(now.getTime() - i * 60000 * (Math.floor(Math.random() * 10) + 1));
+const fetchAlerts = async (page = 1) => {
+  try {
+    // 使用内存告警API
+    const response = await fetch(`${API_BASE_URL}/alerts`);
+    const data = await response.json();
     
-    return {
-      id: `alert-${i + 1001}`,
-      type: alertTypes[Math.floor(Math.random() * alertTypes.length)],
-      location: locations[Math.floor(Math.random() * locations.length)],
-      time: alertTime.toLocaleString(),
-      // 使用随机图片作为快照
-      snapshotUrl: `https://picsum.photos/seed/alert${i}/200/120`,
-      videoUrl: `${SERVER_ROOT_URL}/videos/alert-${i + 1001}.mp4`
-    };
-  });
-};
-
-// 计算属性
-const totalPages = computed(() => {
-  return Math.ceil(alerts.value.length / pageSize.value);
-});
-
-const currentPageAlerts = computed(() => {
-  const start = (currentPage.value - 1) * pageSize.value;
-  const end = start + pageSize.value;
-  return alerts.value.slice(start, end);
-});
-
-const pageRange = computed(() => {
-  // 只显示当前页附近的页码
-  let start = Math.max(1, currentPage.value - 2);
-  let end = Math.min(totalPages.value, start + 4);
-  
-  // 调整起始页码，确保显示5个页码
-  if (end - start < 4) {
-    start = Math.max(1, end - 4);
-  }
-  
-  return Array.from({ length: end - start + 1 }, (_, i) => start + i);
-});
-
-// 定期轮询告警信息（开发阶段使用测试数据）
-let alertPollingInterval = null;
-
-const startAlertPolling = () => {
-  // 先清除之前的轮询
-  if (alertPollingInterval) {
-    clearInterval(alertPollingInterval);
-  }
-
-  // 开发阶段直接使用测试数据
-  alerts.value = generateTestAlerts();
-  
-  // 模拟定期更新（每30秒刷新一次测试数据）
-  alertPollingInterval = setInterval(() => {
-    // 随机更新一条数据，模拟新告警
-    if (alerts.value.length > 0) {
-      const randomIndex = Math.floor(Math.random() * alerts.value.length);
-      const updatedAlerts = [...alerts.value];
-      updatedAlerts[randomIndex] = {
-        ...updatedAlerts[randomIndex],
-        time: new Date().toLocaleString()
+    // 处理内存告警数据，现在应该是对象数组
+    const memoryAlerts = (data.alerts || []).map((alert, index) => {
+      // 如果是字符串，转换为对象格式
+      if (typeof alert === 'string') {
+        return {
+          id: index + 1,
+          event_type: "Memory Alert",
+          details: alert,
+          timestamp: new Date().toISOString(),
+          status: "unprocessed",
+          video_path: null,
+          frame_snapshot_path: null
+        };
+      }
+      // 如果已经是对象，直接使用
+      return {
+        id: alert.id || index + 1,
+        event_type: alert.event_type || "Memory Alert",
+        details: alert.details || alert.message || "未知告警",
+        timestamp: alert.timestamp || new Date().toISOString(),
+        status: alert.status || "unprocessed",
+        video_path: alert.video_path || null,
+        frame_snapshot_path: alert.snapshot_path || null
       };
-      alerts.value = updatedAlerts;
-    }
-  }, 30000);
-};
-
-// 分页控制方法
-const prevPage = () => {
-  if (currentPage.value > 1) {
-    currentPage.value--;
+    });
+    
+    alerts.value = memoryAlerts;
+    currentPage.value = 1;
+    totalPages.value = 1;
+  } catch (error) {
+    console.error('获取告警失败:', error);
+    alerts.value = [];
   }
 };
 
-const nextPage = () => {
-  if (currentPage.value < totalPages.value) {
-    currentPage.value++;
+const changeStatus = async (alert, newStatus) => {
+  // 内存告警系统不支持状态更新，只是在前端模拟
+  const index = alerts.value.findIndex(a => a.id === alert.id);
+  if (index !== -1) {
+    alerts.value[index].status = newStatus;
   }
 };
 
-const goToPage = (page) => {
-  currentPage.value = page;
+const getSnapshotUrl = (snapshotPath) => {
+  if (!snapshotPath) {
+    return 'https://via.placeholder.com/200x120?text=No+Snapshot';
+  }
+  return `${SERVER_ROOT_URL}${snapshotPath}`;
 };
 
-// 操作方法
-const handleAlert = (alertId) => {
-  // 跳转到告警处置页面，携带告警ID
-  router.push({ name: 'AlertHandle', params: { id: alertId } });
+const onImageError = (event) => {
+  event.target.src = 'https://via.placeholder.com/200x120?text=Error';
 };
 
-const playVideo = (videoUrl) => {
-  // 开发阶段显示提示
-  alert(`播放告警视频: ${videoUrl}\n(实际环境中会打开视频播放器)`);
-  // 实际环境中使用：window.open(videoUrl, '_blank');
+const playVideo = (videoPath) => {
+  if (!videoPath) return;
+  const videoUrl = `${SERVER_ROOT_URL}${videoPath}`;
+  window.open(videoUrl, '_blank');
 };
 
-// 生命周期钩子
+const showSnapshotModal = (url) => {
+  modalSnapshotUrl.value = url;
+  snapshotModalVisible.value = true;
+};
+
+const hideSnapshotModal = () => {
+  snapshotModalVisible.value = false;
+};
+
 onMounted(() => {
-  startAlertPolling();
-});
-
-onUnmounted(() => {
-  if (alertPollingInterval) {
-    clearInterval(alertPollingInterval);
-  }
+  fetchAlerts(currentPage.value);
+  // 每5秒刷新一次告警
+  setInterval(() => {
+    fetchAlerts(currentPage.value);
+  }, 5000);
 });
 </script>
 
-<style>
-/* 样式部分与之前保持一致 */
+<style scoped>
+/* 样式部分可以复用 AlertCenter.vue 的样式，或根据需要进行调整 */
 .alert-info-page {
+  padding: 2rem;
+  font-family: sans-serif;
   max-width: 1400px;
   margin: 0 auto;
-  padding: 20px;
 }
-
-h1 {
-  text-align: center;
-  margin-bottom: 30px;
-  color: #2c3e50;
+.filters {
+  margin-bottom: 1rem;
 }
-
-h3 {
-  margin-bottom: 10px;
-  color: #2c3e50;
-  font-size: 16px;
-}
-
-/* 统一控制区域样式 */
-.control-section {
-  margin-bottom: 20px;
-  padding: 15px;
-  background-color: #f9f9f9;
-  border-radius: 5px;
-  border: 1px solid #eee;
-}
-
-.alert-stats {
-  margin-bottom: 15px;
-  padding: 10px;
-  background-color: #f2f2f2;
-  border-radius: 4px;
-  font-size: 14px;
-}
-
-/* 表格容器样式 */
-.alerts-table-container {
-  overflow-x: auto;
-  margin-bottom: 20px;
-}
-
 .alerts-table {
   width: 100%;
   border-collapse: collapse;
-  background-color: #fff;
 }
-
 .alerts-table th, .alerts-table td {
-  padding: 10px;
   border: 1px solid #ddd;
-  text-align: left;
+  padding: 8px;
+  text-align: center;
 }
-
 .alerts-table th {
   background-color: #f2f2f2;
-  font-weight: 600;
 }
-
-.alert-row {
-  transition: background-color 0.2s;
-}
-
-.alert-row:hover {
-  background-color: #f9f9f9;
-}
-
-/* 告警视频列样式 */
-.alert-video {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
 .alert-snapshot {
-  max-width: 100px;
-  max-height: 60px;
-  object-fit: cover;
-  border-radius: 3px;
-  border: 1px solid #ddd;
+  width: 150px;
+  height: auto;
+  display: block;
+  margin: 0 auto 5px;
+  cursor: pointer; /* 添加指针手势，提示可以点击 */
 }
-
-/* 按钮样式统一 */
-.play-button, .handle-button {
-  padding: 8px 12px;
-  background-color: #2196F3;
+.status-unprocessed {
+  background-color: #fff3f3;
+}
+.status-viewed {
+  background-color: #f3f9ff;
+}
+.status-resolved {
+  background-color: #f3fff3;
+}
+.status-badge {
+  padding: 0.2em 0.6em;
+  border-radius: 0.8em;
+  font-size: 0.8em;
   color: white;
-  border: none;
-  border-radius: 4px;
-  cursor: pointer;
-  font-size: 14px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 5px;
-  width: fit-content;
+  display: inline-block;
 }
-
-.play-button:hover, .handle-button:hover {
-  background-color: #0b7dda;
-}
+.status-unprocessed .status-badge { background-color: #f44336; }
+.status-viewed .status-badge { background-color: #2196F3; }
+.status-resolved .status-badge { background-color: #4CAF50; }
 
 .handle-button {
-  background-color: #4CAF50;
+  margin-right: 5px;
 }
-
-.handle-button:hover {
-  background-color: #45a049;
-}
-
-/* 无数据状态样式 */
-.no-alert-row td {
-  height: 150px; /* 保持表格高度 */
-  vertical-align: middle;
-}
-
-.video-placeholder {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: #999;
-  height: 100%;
-}
-
-/* 分页控件样式 */
 .pagination-controls {
+  margin-top: 1rem;
+  text-align: center;
   display: flex;
   justify-content: center;
   align-items: center;
   gap: 10px;
-  margin-top: 20px;
 }
 
-.page-button, .page-number {
-  padding: 8px 12px;
-  background-color: #f2f2f2;
-  color: #333;
-  border: none;
-  border-radius: 4px;
-  cursor: pointer;
-  font-size: 14px;
-}
-
-.page-button:hover, .page-number:hover:not(.active) {
-  background-color: #e0e0e0;
-}
-
-.page-button:disabled {
-  background-color: #f5f5f5;
-  color: #aaa;
-  cursor: not-allowed;
-}
-
-.page-number.active {
-  background-color: #2196F3;
-  color: white;
-}
-
-.page-numbers {
+/* 快照模态框样式 */
+.snapshot-modal {
+  position: fixed;
+  z-index: 1000;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+  overflow: auto;
+  background-color: rgba(0,0,0,0.8);
   display: flex;
-  gap: 5px;
+  justify-content: center;
+  align-items: center;
 }
 
-/* 响应式调整 */
-@media (max-width: 1024px) {
-  .alerts-table th, .alerts-table td {
-    padding: 8px;
-    font-size: 13px;
+.modal-content {
+  position: relative;
+  margin: auto;
+  padding: 20px;
+  background: #fff;
+  border-radius: 5px;
+  max-width: 90vw;
+  max-height: 90vh;
+}
+
+.modal-image {
+  max-width: 100%;
+  max-height: calc(90vh - 60px); /* 留出一些空间给关闭按钮 */
+  display: block;
+}
+
+.close-button {
+  position: absolute;
+  top: 10px;
+  right: 25px;
+  color: #f1f1f1;
+  font-size: 40px;
+  font-weight: bold;
+  transition: 0.3s;
+  cursor: pointer;
   }
   
-  .alert-snapshot {
-    max-width: 80px;
-    max-height: 50px;
-  }
+.close-button:hover,
+.close-button:focus {
+  color: #bbb;
+  text-decoration: none;
 }
 </style>

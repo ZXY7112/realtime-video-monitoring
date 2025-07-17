@@ -43,6 +43,7 @@ def create_app():
     # 在蓝图导入部分添加
     from app.routes.rtmp_routes import rtmp_bp  # 添加这行
     from app.routes.main import main_bp  # 添加这行导入 main_bp
+    from app.routes.alerts_routes import alerts_bp, register_swag_definitions
     
     # 在蓝图注册部分添加
     app.register_blueprint(rtmp_bp)  # 添加这行
@@ -53,12 +54,19 @@ def create_app():
     app.register_blueprint(config_bp)
     app.register_blueprint(auth_bp)
     app.register_blueprint(dlib_bp) # 注册 Dlib 蓝图
+    app.register_blueprint(alerts_bp)
+    
+    # 注册 Swagger 定义
+    register_swag_definitions(swagger)
     
     add_jwt_handlers(jwt)
     
     # 添加全局错误处理
     add_error_handlers(app)
     with app.app_context():
+        # 导入模型，以便 create_all 能够找到它们
+        from app.models.alert import Alert
+        
         try:
             # 使用SQLAlchemy 2.0+的正确语法
             with db.engine.connect() as conn:
@@ -70,6 +78,9 @@ def create_app():
             import traceback
             print(traceback.format_exc())
 
+        # 创建数据库表（如果它们不存在）
+        db.create_all()
+        print("✅ 数据库表已创建 (如果不存在).")
 
 
     return app 

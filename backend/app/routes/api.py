@@ -1,4 +1,4 @@
-from flask import Blueprint, jsonify
+from flask import Blueprint, jsonify, request
 
 # 创建API蓝图
 api_bp = Blueprint('api', __name__, url_prefix='/api')
@@ -31,6 +31,15 @@ def api_status():
         "message": "Video monitoring API is operational"
     })
 
+@api_bp.route("/test-alert", methods=["POST"])
+def add_test_alert():
+    """添加测试告警到内存"""
+    from app.services.alerts import add_alert_memory
+    data = request.get_json()
+    message = data.get('message', '测试告警')
+    add_alert_memory(message)
+    return jsonify({"status": "success", "message": f"已添加告警: {message}"})
+
 @api_bp.route("/alerts")
 def get_alerts():
     """获取告警信息端点
@@ -49,5 +58,11 @@ def get_alerts():
                 type: string
               description: 警报信息列表.
     """
-    from app.services.alerts import get_alerts
-    return jsonify({"alerts": get_alerts()}) 
+    from app.services.alerts import get_alerts as get_memory_alerts
+    try:
+        # 获取内存中的告警信息
+        memory_alerts = get_memory_alerts()
+        return jsonify({"alerts": memory_alerts})
+    except Exception as e:
+        print(f"获取内存告警失败: {e}")
+        return jsonify({"alerts": []})
